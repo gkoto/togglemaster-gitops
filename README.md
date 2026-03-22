@@ -1,263 +1,111 @@
-# ToggleMaster - Infraestrutura & DevOps
+# ToggleMaster - GitOps
 
-## Tech Challenge Fase 3 - Pós-Tech FIAP DevOps & Cloud Computing
+Repositório de manifestos Kubernetes e configuração do ArgoCD pro ToggleMaster.
 
-Projeto completo de infraestrutura como código (Terraform), CI/CD (GitHub Actions) e GitOps (ArgoCD) para a plataforma de feature flags **ToggleMaster**.
+O ArgoCD monitora esse repositório e sincroniza qualquer mudança automaticamente no cluster EKS. Quando o CI de um microsserviço faz push de uma imagem nova pro ECR, ele atualiza a tag aqui e o ArgoCD faz o deploy.
 
----
-
-## Arquitetura
+## Estrutura
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         AWS (us-east-1)                         │
-│  ┌──────────────────── VPC 10.0.0.0/16 ──────────────────────┐ │
-│  │                                                             │ │
-│  │  Public Subnets          Private Subnets                    │ │
-│  │  ┌──────────┐            ┌──────────────────────────┐       │ │
-│  │  │ NAT GW   │            │  EKS Node Group          │       │ │
-│  │  │ IGW      │            │  ┌─────┐ ┌─────┐ ┌────┐ │       │ │
-│  │  └──────────┘            │  │auth │ │flag │ │... │ │       │ │
-│  │                          │  └─────┘ └─────┘ └────┘ │       │ │
-│  │                          └──────────────────────────┘       │ │
-│  │                                                             │ │
-│  │  ┌─────────────┐  ┌──────────┐  ┌──────────┐              │ │
-│  │  │ RDS x3      │  │ Redis    │  │ DynamoDB │  ┌─────┐     │ │
-│  │  │ PostgreSQL  │  │ ElastiC. │  │          │  │ SQS │     │ │
-│  │  └─────────────┘  └──────────┘  └──────────┘  └─────┘     │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-│                                                                   │
-│  ┌──────────┐                                                     │
-│  │ ECR x5   │  (repositórios de imagens Docker)                   │
-│  └──────────┘                                                     │
-└───────────────────────────────────────────────────────────────────┘
-
-GitHub Actions (CI) ──push image──> ECR
-                     ──update tag──> GitOps Repo
-ArgoCD (CD) ──watch──> GitOps Repo ──sync──> EKS
+.
+├── base/                  # namespace, configmaps e secrets
+├── apps/
+│   ├── auth-service/      # deployment + service (Go, porta 8001)
+│   ├── flag-service/      # deployment + service (Python, porta 8002)
+│   ├── targeting-service/ # deployment + service (Python, porta 8003)
+│   ├── evaluation-service/# deployment + service (Go, porta 8004)
+│   └── analytics-service/ # deployment + service (Python, porta 8005)
+└── argocd/
+    ├── applications.yaml  # definição das 5 Applications do ArgoCD
+    └── install-argocd.sh  # script de instalação do ArgoCD
 ```
 
----
+## Como funciona o fluxo
 
-## Estrutura de Repositórios
+1. Dev faz push no repo de um microsserviço
+2. GitHub Actions roda build, testes, lint, scan de segurança
+3. Se passou, builda a imagem Docker e envia pro ECR
+4. O último step do CI atualiza o `deployment.yaml` aqui nesse repo com a nova tag
+5. ArgoCD detecta a mudança e faz o deploy no EKS automaticamente
 
-Você terá **3 tipos de repositório** no GitHub:
+## Arquitetura na AWS
 
-| Repositório | Conteúdo |
-|---|---|
-| `togglemaster-infra` | Código Terraform (este diretório) |
-| `togglemaster-gitops` | Manifestos K8s + ArgoCD |
-| 5x repos de microsserviços | Código fonte + `.github/workflows/ci.yml` |
+```
+GitHub Actions (CI)  ── push imagem ──>  ECR
+                     ── atualiza tag ──> este repo
+ArgoCD (CD)          ── monitora ──>     este repo  ── sync ──> EKS
+```
 
----
+Recursos provisionados via Terraform (repo `togglemaster-infra`):
 
-## Pré-requisitos
+- VPC com subnets públicas e privadas
+- EKS com 2 nodes (t3.medium)
+- 3x RDS PostgreSQL (auth, flag, targeting)
+- ElastiCache Redis (targeting, evaluation)
+- DynamoDB - tabela ToggleMasterAnalytics
+- SQS - fila de eventos de avaliação
+- ECR - 5 repositórios de imagens
 
-- AWS CLI configurado (`aws configure`)
-- Terraform >= 1.5.0
-- kubectl
-- Git
+## Setup inicial
 
----
+Pré-requisitos: AWS CLI, Terraform, kubectl, git.
 
-## PASSO A PASSO COMPLETO
+### 1. Infra (Terraform)
 
-### ETAPA 1: Criar o Bucket S3 para o Backend Remoto
-
-O Terraform precisa guardar o estado (tfstate) remotamente. Crie o bucket **antes** de tudo:
+Criar o bucket S3 pro state remoto e rodar o Terraform:
 
 ```bash
-# Troque SEU_ACCOUNT_ID pelo seu Account ID da AWS
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
-aws s3api create-bucket \
-  --bucket togglemaster-tfstate-${ACCOUNT_ID} \
-  --region us-east-1
-
-aws s3api put-bucket-versioning \
-  --bucket togglemaster-tfstate-${ACCOUNT_ID} \
-  --versioning-configuration Status=Enabled
-
-echo "Bucket criado: togglemaster-tfstate-${ACCOUNT_ID}"
+aws s3api create-bucket --bucket togglemaster-tfstate-${ACCOUNT_ID} --region us-east-1
+aws s3api put-bucket-versioning --bucket togglemaster-tfstate-${ACCOUNT_ID} --versioning-configuration Status=Enabled
 ```
-
-### ETAPA 2: Configurar o Terraform
 
 ```bash
 cd togglemaster-infra
-
-# 1. Edite o backend no main.tf - troque "togglemaster-tfstate-CHANGE-ME"
-#    pelo nome do bucket criado acima
-nano main.tf
-
-# 2. Crie o arquivo de variáveis
 cp terraform.tfvars.example terraform.tfvars
-nano terraform.tfvars  # preencha db_password com uma senha forte
+# editar terraform.tfvars com a senha do banco
+# editar main.tf com o nome do bucket S3
+terraform init && terraform apply
 ```
 
-### ETAPA 3: Aplicar o Terraform
+### 2. Conectar no cluster
 
 ```bash
-# Inicializar (baixa providers e configura backend S3)
-terraform init
-
-# Ver o plano de execução
-terraform plan
-
-# Aplicar (vai demorar ~15-20 minutos por causa do EKS e RDS)
-terraform apply
-
-# Salve os outputs! Você vai precisar deles
-terraform output -json > ../outputs.json
-```
-
-### ETAPA 4: Configurar kubectl
-
-```bash
-# O comando exato aparece no output do Terraform
-aws eks update-kubeconfig \
-  --name togglemaster-prod-eks \
-  --region us-east-1
-
-# Verificar conexão
+aws eks update-kubeconfig --name togglemaster-prod-eks --region us-east-1
 kubectl get nodes
 ```
 
-### ETAPA 5: Instalar ArgoCD
+### 3. Instalar ArgoCD
 
 ```bash
-cd ../togglemaster-gitops
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
 
-# Tornar executável e rodar
-chmod +x argocd/install-argocd.sh
-bash argocd/install-argocd.sh
-
-# Aguardar LoadBalancer (pode demorar 2-3 min)
-kubectl get svc argocd-server -n argocd -w
+# pegar a senha
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
 ```
 
-### ETAPA 6: Configurar o Repositório GitOps
+### 4. Aplicar manifestos
 
 ```bash
-# 1. Atualize os ConfigMaps com os outputs do Terraform
-#    Substitua "PREENCHA-COM-OUTPUT-TERRAFORM" em base/configmaps.yaml
-#    com os valores reais de rds_endpoints, redis_endpoint, sqs_queue_url
-
-# 2. Atualize as imagens nos deployments com o ECR correto
-#    Substitua "123456789012" pelo seu Account ID em todos os apps/*/deployment.yaml
-
-# 3. Troque <SEU_USUARIO_GITHUB> em argocd/applications.yaml
-
-# 4. Push pro GitHub
-cd togglemaster-gitops
-git init
-git add .
-git commit -m "feat: initial gitops manifests"
-git remote add origin https://github.com/<SEU_USUARIO>/togglemaster-gitops.git
-git push -u origin main
-```
-
-### ETAPA 7: Aplicar os manifestos base e as Applications do ArgoCD
-
-```bash
-# Aplicar namespace, configmaps e secrets
 kubectl apply -f base/
-
-# Aplicar as Applications do ArgoCD
 kubectl apply -f argocd/applications.yaml
-
-# Verificar no ArgoCD UI (acesse a URL do LoadBalancer)
-# Login: admin / <senha do passo 5>
 ```
 
-### ETAPA 8: Configurar CI nos repos dos microsserviços
+### 5. Configurar CI nos microsserviços
 
-Para cada um dos 5 repos (`auth-service`, `flag-service`, etc.):
+Cada repo precisa de um `.github/workflows/ci.yml` e dos secrets configurados:
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`  
+- `GITOPS_PAT`
+
+## Limpeza
+
+Depois de entregar o projeto, destruir tudo pra não gerar custo:
 
 ```bash
-# 1. Faça fork do repo original para sua conta
-# 2. Copie o workflow correto:
-#    - Para Go (auth-service, evaluation-service): ci-go.yml
-#    - Para Python (flag-service, targeting-service, analytics-service): ci-python.yml
-# 3. Renomeie para .github/workflows/ci.yml
-# 4. Edite SERVICE_NAME e ECR_REPOSITORY no arquivo
-
-# 5. Configure os Secrets no GitHub (Settings > Secrets > Actions):
-#    - AWS_ACCESS_KEY_ID
-#    - AWS_SECRET_ACCESS_KEY
-#    - GITOPS_PAT (Personal Access Token com acesso ao repo gitops)
+kubectl delete -f argocd/applications.yaml
+cd togglemaster-infra && terraform destroy
+aws s3 rb s3://togglemaster-tfstate-<ACCOUNT_ID> --force
 ```
-
-### ETAPA 9: Testar o Fluxo Completo
-
-```bash
-# 1. Faça uma alteração em qualquer microsserviço
-# 2. Abra um PR → CI roda (build, lint, security)
-# 3. Merge na main → CI faz docker build + push ECR + atualiza gitops
-# 4. ArgoCD detecta mudança → sincroniza automaticamente no EKS
-# 5. Verifique na UI do ArgoCD que tudo está "Synced" e "Healthy"
-```
-
----
-
-## Custos Estimados (AWS)
-
-> ⚠️ ATENÇÃO: Estes recursos geram custos na AWS!
-
-| Recurso | Custo estimado/mês |
-|---|---|
-| EKS Cluster | ~$73 |
-| 2x t3.medium (nodes) | ~$60 |
-| 3x RDS db.t3.micro | ~$45 |
-| ElastiCache cache.t3.micro | ~$12 |
-| NAT Gateway | ~$32 |
-| DynamoDB (on-demand) | ~$1 |
-| SQS | ~$0 |
-| ECR | ~$1 |
-| **TOTAL** | **~$224/mês** |
-
-**Para destruir tudo após a entrega:**
-```bash
-cd togglemaster-infra
-terraform destroy
-# Depois delete o bucket S3 manualmente
-```
-
----
-
-## Estrutura do Terraform
-
-```
-togglemaster-infra/
-├── main.tf                 # Config principal + módulos
-├── variables.tf            # Variáveis globais
-├── outputs.tf              # Outputs
-├── terraform.tfvars.example
-└── modules/
-    ├── networking/         # VPC, Subnets, IGW, NAT, Routes
-    ├── eks/                # Cluster EKS + Node Group + IAM
-    ├── rds/                # 3x PostgreSQL
-    ├── elasticache/        # Redis cluster
-    ├── dynamodb/           # Tabela ToggleMasterAnalytics
-    ├── sqs/                # Fila de eventos
-    └── ecr/                # 5 repositórios de imagens
-```
-
----
-
-## Troubleshooting
-
-**Terraform init falha com erro de bucket:**
-→ Verifique se criou o bucket S3 (Etapa 1) e se o nome está correto no `main.tf`
-
-**EKS nodes não aparecem:**
-→ Aguarde ~5 min após apply. Verifique: `kubectl get nodes`
-
-**ArgoCD não sincroniza:**
-→ Verifique se o repo gitops é público ou se configurou credenciais no ArgoCD:
-```bash
-argocd repo add https://github.com/<user>/togglemaster-gitops.git --username <user> --password <PAT>
-```
-
-**Pods em CrashLoopBackOff:**
-→ Provavelmente ConfigMaps com valores placeholder. Atualize com outputs reais do Terraform.
