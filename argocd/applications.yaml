@@ -1,0 +1,162 @@
+# ArgoCD
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: togglemaster
+  namespace: argocd
+spec:
+  description: "ToggleMaster - Feature Flag Platform"
+  sourceRepos:
+    - "https://github.com/gkoto/togglemaster-gitops.git"
+  destinations:
+    - namespace: togglemaster
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+---
+# Base resources (namespace, configmaps, secrets)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: togglemaster-base
+  namespace: argocd
+  labels:
+    project: togglemaster
+spec:
+  project: togglemaster
+  source:
+    repoURL: "https://github.com/gkoto/togglemaster-gitops.git"
+    targetRevision: main
+    path: base
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: togglemaster
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+---
+# auth-service
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: auth-service
+  namespace: argocd
+  labels:
+    project: togglemaster
+    service: auth-service
+spec:
+  project: togglemaster
+  source:
+    repoURL: "https://github.com/gkoto/togglemaster-gitops.git"
+    targetRevision: main
+    path: apps/auth-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: togglemaster
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+---
+# flag-service
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: flag-service
+  namespace: argocd
+  labels:
+    project: togglemaster
+    service: flag-service
+spec:
+  project: togglemaster
+  source:
+    repoURL: "https://github.com/gkoto/togglemaster-gitops.git"
+    targetRevision: main
+    path: apps/flag-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: togglemaster
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+---
+# targeting-service
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: targeting-service
+  namespace: argocd
+  labels:
+    project: togglemaster
+    service: targeting-service
+spec:
+  project: togglemaster
+  source:
+    repoURL: "https://github.com/gkoto/togglemaster-gitops.git"
+    targetRevision: main
+    path: apps/targeting-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: togglemaster
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+---
+# evaluation-service
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: evaluation-service
+  namespace: argocd
+  labels:
+    project: togglemaster
+    service: evaluation-service
+spec:
+  project: togglemaster
+  source:
+    repoURL: "https://github.com/gkoto/togglemaster-gitops.git"
+    targetRevision: main
+    path: apps/evaluation-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: togglemaster
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+---
+# analytics-service
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: analytics-service
+  namespace: argocd
+  labels:
+    project: togglemaster
+    service: analytics-service
+spec:
+  project: togglemaster
+  source:
+    repoURL: "https://github.com/gkoto/togglemaster-gitops.git"
+    targetRevision: main
+    path: apps/analytics-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: togglemaster
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
