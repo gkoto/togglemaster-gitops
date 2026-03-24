@@ -1,58 +1,52 @@
 # ToggleMaster - GitOps
 
-Repositório de manifestos Kubernetes e configuração do ArgoCD pro ToggleMaster.
+Esse repo guarda os manifestos Kubernetes e a config do ArgoCD do ToggleMaster.
 
-O ArgoCD monitora esse repositório e sincroniza qualquer mudança automaticamente no cluster EKS. Quando o CI de um microsserviço faz push de uma imagem nova pro ECR, ele atualiza a tag aqui e o ArgoCD faz o deploy.
+A ideia é simples: o CI dos microsserviços builda a imagem, manda pro ECR e atualiza a tag aqui. O ArgoCD fica de olho nesse repo e aplica qualquer mudança direto no cluster.
 
-## Estrutura
+## Organização
 
 ```
 .
-├── base/                  # namespace, configmaps e secrets
+├── base/                  # namespace, configmaps, secrets
 ├── apps/
-│   ├── auth-service/      # deployment + service (Go, porta 8001)
-│   ├── flag-service/      # deployment + service (Python, porta 8002)
-│   ├── targeting-service/ # deployment + service (Python, porta 8003)
-│   ├── evaluation-service/# deployment + service (Go, porta 8004)
-│   └── analytics-service/ # deployment + service (Python, porta 8005)
+│   ├── auth-service/      # Go, porta 8001
+│   ├── flag-service/      # Python, porta 8002
+│   ├── targeting-service/ # Python, porta 8003
+│   ├── evaluation-service/# Go, porta 8004
+│   └── analytics-service/ # Python, porta 8005
 └── argocd/
-    ├── applications.yaml  # definição das 5 Applications do ArgoCD
-    └── install-argocd.sh  # script de instalação do ArgoCD
+    ├── applications.yaml  # as 5 apps do ArgoCD
+    └── install-argocd.sh  # script pra instalar o ArgoCD no cluster
 ```
 
-## Como funciona o fluxo
+Cada pasta em `apps/` tem um `deployment.yaml` e um `service.yaml`.
 
-1. Dev faz push no repo de um microsserviço
-2. GitHub Actions roda build, testes, lint, scan de segurança
-3. Se passou, builda a imagem Docker e envia pro ECR
-4. O último step do CI atualiza o `deployment.yaml` aqui nesse repo com a nova tag
-5. ArgoCD detecta a mudança e faz o deploy no EKS automaticamente
+## Fluxo de deploy
 
-## Arquitetura na AWS
+O deploy funciona assim:
 
-```
-GitHub Actions (CI)  ── push imagem ──>  ECR
-                     ── atualiza tag ──> este repo
-ArgoCD (CD)          ── monitora ──>     este repo  ── sync ──> EKS
-```
+Dev faz push num microsserviço → GitHub Actions roda os testes e scans → builda a imagem e manda pro ECR → atualiza a tag no deployment.yaml desse repo → ArgoCD percebe a mudança e faz o deploy no EKS.
 
-Recursos provisionados via Terraform (repo `togglemaster-infra`):
+Ninguém faz deploy manual. Tudo passa pelo Git.
 
-- VPC com subnets públicas e privadas
-- EKS com 2 nodes (t3.medium)
-- 3x RDS PostgreSQL (auth, flag, targeting)
-- ElastiCache Redis (targeting, evaluation)
-- DynamoDB - tabela ToggleMasterAnalytics
-- SQS - fila de eventos de avaliação
-- ECR - 5 repositórios de imagens
+## Infra por trás
 
-## Setup inicial
+A infra toda tá no repo `togglemaster-infra` e foi criada com Terraform:
 
-Pré-requisitos: AWS CLI, Terraform, kubectl, git.
+- VPC com subnets públicas e privadas em 2 AZs
+- EKS com 2 nodes t3.medium nas subnets privadas
+- 3 instâncias RDS PostgreSQL (uma por serviço que usa banco)
+- ElastiCache Redis
+- DynamoDB (tabela ToggleMasterAnalytics)
+- SQS pra fila de eventos
+- 5 repos no ECR
 
-### 1. Infra (Terraform)
+## Como subir do zero
 
-Criar o bucket S3 pro state remoto e rodar o Terraform:
+Precisa de: AWS CLI, Terraform, kubectl e git.
+
+**Criar o bucket pro state do Terraform:**
 
 ```bash
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -60,52 +54,46 @@ aws s3api create-bucket --bucket togglemaster-tfstate-${ACCOUNT_ID} --region us-
 aws s3api put-bucket-versioning --bucket togglemaster-tfstate-${ACCOUNT_ID} --versioning-configuration Status=Enabled
 ```
 
+**Rodar o Terraform:**
+
 ```bash
 cd togglemaster-infra
 cp terraform.tfvars.example terraform.tfvars
-# editar terraform.tfvars com a senha do banco
-# editar main.tf com o nome do bucket S3
+# edita o tfvars com a senha do banco e o main.tf com o nome do bucket
 terraform init && terraform apply
 ```
 
-### 2. Conectar no cluster
+**Conectar no cluster e instalar ArgoCD:**
 
 ```bash
 aws eks update-kubeconfig --name togglemaster-prod-eks --region us-east-1
-kubectl get nodes
-```
-
-### 3. Instalar ArgoCD
-
-```bash
 kubectl create namespace argocd
 kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
-
-# pegar a senha
-kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
 ```
 
-### 4. Aplicar manifestos
+**Aplicar os manifestos e registrar as apps:**
 
 ```bash
 kubectl apply -f base/
 kubectl apply -f argocd/applications.yaml
 ```
 
-### 5. Configurar CI nos microsserviços
+A senha do ArgoCD pega com:
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+```
 
-Cada repo precisa de um `.github/workflows/ci.yml` e dos secrets configurados:
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`  
-- `GITOPS_PAT`
+**CI nos microsserviços:**
 
-## Limpeza
+Cada repo precisa de `.github/workflows/ci.yml` e 3 secrets configurados: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` e `GITOPS_PAT`.
 
-Depois de entregar o projeto, destruir tudo pra não gerar custo:
+## Pra derrubar tudo
 
 ```bash
 kubectl delete -f argocd/applications.yaml
+kubectl delete namespace togglemaster
+kubectl delete namespace argocd
 cd togglemaster-infra && terraform destroy
 aws s3 rb s3://togglemaster-tfstate-<ACCOUNT_ID> --force
 ```
